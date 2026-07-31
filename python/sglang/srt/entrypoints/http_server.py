@@ -1664,6 +1664,22 @@ async def openai_v1_completions(request: CompletionRequest, raw_request: Request
     )
 
 
+@app.post(
+    "/v1/completions/preprocess",
+    response_class=ORJSONResponse,
+    dependencies=[Depends(validate_json_request)],
+)
+async def openai_v1_completions_preprocess(
+    request: CompletionRequest, raw_request: Request
+):
+    """Preprocess an OpenAI-compatible text completion request without generation."""
+    return (
+        await raw_request.app.state.openai_serving_completion.handle_preprocess_request(
+            request, raw_request, source_endpoint="/v1/completions"
+        )
+    )
+
+
 @app.post("/v1/chat/completions", dependencies=[Depends(validate_json_request)])
 async def openai_v1_chat_completions(
     request: ChatCompletionRequest, raw_request: Request
@@ -1671,6 +1687,20 @@ async def openai_v1_chat_completions(
     """OpenAI-compatible chat completion endpoint."""
     return await raw_request.app.state.openai_serving_chat.handle_request(
         request, raw_request
+    )
+
+
+@app.post(
+    "/v1/chat/completions/preprocess",
+    response_class=ORJSONResponse,
+    dependencies=[Depends(validate_json_request)],
+)
+async def openai_v1_chat_completions_preprocess(
+    request: ChatCompletionRequest, raw_request: Request
+):
+    """Preprocess an OpenAI-compatible chat completion request without generation."""
+    return await raw_request.app.state.openai_serving_chat.handle_preprocess_request(
+        request, raw_request, source_endpoint="/v1/chat/completions"
     )
 
 

@@ -844,5 +844,99 @@ class TestTokenizeDetokenize(CustomTestCase):
         self.assertEqual(r2.status_code, 500)
 
 
+class TestPreprocessEndpoint(CustomTestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.model = DEFAULT_SMALL_MODEL_NAME_FOR_TEST
+        cls.base_url = DEFAULT_URL_FOR_TEST
+        cls.chat_preprocess_url = f"{cls.base_url}/v1/chat/completions/preprocess"
+        cls.completions_preprocess_url = f"{cls.base_url}/v1/completions/preprocess"
+        cls.session = requests.Session()
+        cls.process = popen_launch_server(
+            cls.model,
+            cls.base_url,
+            timeout=DEFAULT_TIMEOUT_FOR_SERVER_LAUNCH,
+            env=SERVER_ENV,
+        )
+        cls.tokenizer = get_tokenizer(cls.model)
+
+    @classmethod
+    def tearDownClass(cls):
+        kill_process_tree(cls.process.pid)
+        cls.session.close()
+
+    def _post_json(self, url, payload):
+        r = self.session.post(url, json=payload)
+        r.raise_for_status()
+        return r.json()
+
+    def test_chat_preprocess_matches_chat_template_tokens(self):
+        messages = [{"role": "user", "content": "What is the weather in Paris?"}]
+        resp = self._post_json(
+            self.chat_preprocess_url,
+            {
+                "model": self.model,
+                "messages": messages,
+                "max_tokens": 7,
+                "temperature": 0,
+            },
+        )
+
+        expected_tokens = self.tokenizer.apply_chat_template(
+            messages,
+            tokenize=True,
+            add_generation_prompt=True,
+        )
+        if not isinstance(expected_tokens, list):
+            expected_tokens = expected_tokens["input_ids"]
+        if hasattr(expected_tokens, "tolist"):
+            expected_tokens = expected_tokens.tolist()
+
+        self.assertEqual(resp["object"], "sglang.preprocess")
+        self.assertEqual(resp["version"], "v1")
+        self.assertEqual(resp["source_endpoint"], "/v1/chat/completions")
+        self.assertNotIn("choices", resp)
+        self.assertEqual(len(resp["requests"]), 1)
+
+        item = resp["requests"][0]
+        self.assertEqual(item["input_ids"], expected_tokens)
+        self.assertEqual(item["input_token_count"], len(expected_tokens))
+        self.assertEqual(item["sampling_params"]["max_new_tokens"], 7)
+        self.assertEqual(item["sampling_params"]["top_k"], 1)
+        self.assertTrue(item["sampling_params"]["is_normalized"])
+
+    def test_completions_preprocess_matches_prompt_tokens(self):
+        prompt = "The capital of France is"
+        resp = self._post_json(
+            self.completions_preprocess_url,
+            {
+                "model": self.model,
+                "prompt": prompt,
+                "max_tokens": 5,
+                "temperature": 0,
+            },
+        )
+
+        expected_tokens = self.tokenizer.encode(prompt)
+        item = resp["requests"][0]
+        self.assertNotIn("choices", resp)
+        self.assertEqual(item["input_ids"], expected_tokens)
+        self.assertEqual(item["input_token_count"], len(expected_tokens))
+        self.assertEqual(item["sampling_params"]["max_new_tokens"], 5)
+        self.assertEqual(item["sampling_params"]["top_k"], 1)
+
+    def test_preprocess_rejects_stream(self):
+        r = self.session.post(
+            self.completions_preprocess_url,
+            json={
+                "model": self.model,
+                "prompt": "hello",
+                "stream": True,
+            },
+        )
+        self.assertEqual(r.status_code, 400)
+        self.assertIn("stream is not supported", r.text)
+
+
 if __name__ == "__main__":
     unittest.main()

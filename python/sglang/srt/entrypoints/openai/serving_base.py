@@ -12,6 +12,7 @@ from fastapi.responses import ORJSONResponse, StreamingResponse
 
 from sglang.srt.entrypoints.openai.encoding_dsv32 import DS32EncodingError
 from sglang.srt.entrypoints.openai.protocol import ErrorResponse, OpenAIServingRequest
+from sglang.srt.entrypoints.openai.serving_preprocess import build_preprocess_response
 from sglang.srt.managers.io_struct import EmbeddingReqInput, GenerateReqInput
 from sglang.srt.observability.req_time_stats import monotonic_time
 from sglang.srt.server_args import ServerArgs
@@ -126,6 +127,78 @@ class OpenAIServingBase(ABC):
             )
         except Exception as e:
             logger.exception(f"Error in request: {e}")
+            return self.create_error_response(
+                message=f"Internal server error: {str(e)}",
+                err_type="InternalServerError",
+                status_code=500,
+            )
+
+    async def handle_preprocess_request(
+        self,
+        request: OpenAIServingRequest,
+        raw_request: Request,
+        source_endpoint: str,
+    ) -> ORJSONResponse:
+        received_time = monotonic_time()
+
+        try:
+            error_msg = self._validate_request(request)
+            if error_msg:
+                return self.create_error_response(error_msg)
+
+            if hasattr(request, "stream") and request.stream:
+                return self.create_error_response(
+                    message="stream is not supported on preprocess endpoints",
+                    err_type="BadRequest",
+                    status_code=400,
+                )
+
+            request_logger = self.tokenizer_manager.request_logger
+            if request_logger.log_requests and request_logger.log_requests_level >= 2:
+                request_logger.log_openai_received_request(request, request=raw_request)
+
+            adapted_request, processed_request = self._convert_to_internal_request(
+                request, raw_request
+            )
+            if not isinstance(adapted_request, GenerateReqInput):
+                return self.create_error_response(
+                    message=f"{self.__class__.__name__} does not support preprocess",
+                    err_type="NotImplementedError",
+                    status_code=501,
+                )
+
+            adapted_request.received_time = received_time
+            tokenized_requests = (
+                await self.tokenizer_manager.preprocess_generate_request(
+                    adapted_request, raw_request
+                )
+            )
+            response = build_preprocess_response(
+                tokenized_requests,
+                request=processed_request,
+                source_endpoint=source_endpoint,
+                adapted_request=adapted_request,
+            )
+            return ORJSONResponse(content=response.model_dump(mode="json"))
+        except HTTPException as e:
+            return self.create_error_response(
+                message=e.detail, err_type=str(e.status_code), status_code=e.status_code
+            )
+        except ValueError as e:
+            return self.create_error_response(
+                message=str(e),
+                err_type="BadRequest",
+                status_code=400,
+            )
+        except DS32EncodingError as e:
+            logger.info(f"DS32EncodingError: {e}")
+            return self.create_error_response(
+                message=str(e),
+                err_type="BadRequest",
+                status_code=400,
+            )
+        except Exception as e:
+            logger.exception(f"Error in preprocess request: {e}")
             return self.create_error_response(
                 message=f"Internal server error: {str(e)}",
                 err_type="InternalServerError",

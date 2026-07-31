@@ -695,17 +695,7 @@ class TokenizerManager(TokenizerControlMixin, TokenizerManagerScoreMixin):
         # Normalize the request
         obj.normalize_batch_and_arguments()
         self._set_default_priority(obj)
-
-        if isinstance(obj, GenerateReqInput) and obj.routed_dp_rank is not None:
-            dp_size = self.elastic_worker_count
-            if dp_size <= 1 and obj.routed_dp_rank == 0:
-                logger.debug(
-                    f"routed_dp_rank={obj.routed_dp_rank} is ignored because dp_size={dp_size}"
-                )
-            elif obj.routed_dp_rank < 0 or obj.routed_dp_rank >= dp_size:
-                raise ValueError(
-                    f"routed_dp_rank={obj.routed_dp_rank} out of range [0, {dp_size})"
-                )
+        self._validate_generate_routed_dp_rank(obj)
 
         self._init_req_state(obj, request)
         try:
@@ -743,6 +733,67 @@ class TokenizerManager(TokenizerControlMixin, TokenizerManagerScoreMixin):
             # path are left untouched (pop is a no-op).
             self._discard_pending_req_states(obj)
             raise
+
+    async def preprocess_generate_request(
+        self,
+        obj: GenerateReqInput,
+        request: Optional[fastapi.Request] = None,
+    ) -> List[TokenizedGenerateReqInput]:
+        """Tokenize and normalize a generate request without scheduler dispatch."""
+        self.auto_create_handle_loop()
+
+        obj.normalize_batch_and_arguments()
+        self._set_default_priority(obj)
+        self._validate_generate_routed_dp_rank(obj)
+
+        self._init_req_state(obj, request)
+        lora_acquired = False
+        try:
+            async with self.is_pause_cond:
+                await self.is_pause_cond.wait_for(lambda: not self.is_pause)
+
+            async with self.model_update_lock.reader_lock:
+                await self._validate_and_resolve_lora(obj)
+                lora_acquired = obj.lora_id is not None
+
+                if obj.is_single:
+                    return [await self._tokenize_one_request(obj)]
+
+                batch_size = self._preprocess_batch_size(obj)
+                if getattr(
+                    obj, "parallel_sample_num", 1
+                ) == 1 and self._should_use_batch_tokenization(batch_size, obj):
+                    return await self._batch_tokenize_and_process(batch_size, obj)
+
+                return await asyncio.gather(
+                    *(self._tokenize_one_request(obj[i]) for i in range(batch_size))
+                )
+        finally:
+            self._discard_pending_req_states(obj)
+            if lora_acquired:
+                await self.lora_registry.release(obj.lora_id)
+
+    def _validate_generate_routed_dp_rank(
+        self, obj: Union[GenerateReqInput, EmbeddingReqInput]
+    ) -> None:
+        if not isinstance(obj, GenerateReqInput) or obj.routed_dp_rank is None:
+            return
+
+        dp_size = self.elastic_worker_count
+        if dp_size <= 1 and obj.routed_dp_rank == 0:
+            logger.debug(
+                f"routed_dp_rank={obj.routed_dp_rank} is ignored because dp_size={dp_size}"
+            )
+        elif obj.routed_dp_rank < 0 or obj.routed_dp_rank >= dp_size:
+            raise ValueError(
+                f"routed_dp_rank={obj.routed_dp_rank} out of range [0, {dp_size})"
+            )
+
+    @staticmethod
+    def _preprocess_batch_size(obj: GenerateReqInput) -> int:
+        if isinstance(obj.rid, list):
+            return len(obj.rid)
+        return obj.batch_size
 
     def _detect_input_format(
         self, texts: Union[str, List[str]], is_cross_encoder: bool

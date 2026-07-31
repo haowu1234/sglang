@@ -1381,6 +1381,65 @@ class DetokenizeResponse(BaseModel):
     text: Union[str, List[str]]
 
 
+class PreprocessReturnOptions(BaseModel):
+    return_logprob: bool
+    logprob_start_len: int
+    top_logprobs_num: int
+    return_prompt_token_ids: bool
+    return_hidden_states: bool
+    require_reasoning: bool
+
+
+class PreprocessRoutingInfo(BaseModel):
+    routed_dp_rank: Optional[int] = None
+    disagg_prefill_dp_rank: Optional[int] = None
+    routing_key: Optional[str] = None
+    priority: Optional[int] = None
+    extra_key: Optional[str] = None
+    bootstrap_host: Optional[str] = None
+    bootstrap_port: Optional[int] = None
+    bootstrap_room: Optional[int] = None
+
+
+class PreprocessAdapterInfo(BaseModel):
+    lora_id: Optional[str] = None
+
+
+class PreprocessSessionInfo(BaseModel):
+    session_id: Optional[str] = None
+    session_params: Optional[Dict[str, Any]] = None
+
+
+class PreprocessMultimodalInfo(BaseModel):
+    has_mm_inputs: bool = False
+    items: List[Dict[str, Any]] = Field(default_factory=list)
+    padded_input_ids: Optional[List[int]] = None
+    token_ids: Dict[str, Any] = Field(default_factory=dict)
+    summaries: Dict[str, Any] = Field(default_factory=dict)
+
+
+class PreprocessRequestItem(BaseModel):
+    rid: str
+    input_text: Optional[Any] = None
+    input_ids: Optional[List[int]] = None
+    input_token_count: int
+    token_type_ids: Optional[List[int]] = None
+    sampling_params: Dict[str, Any]
+    return_options: PreprocessReturnOptions
+    routing: PreprocessRoutingInfo
+    adapter: PreprocessAdapterInfo
+    session: PreprocessSessionInfo
+    multimodal: PreprocessMultimodalInfo
+
+
+class PreprocessResponse(BaseModel):
+    object: str = "sglang.preprocess"
+    version: str = "v1"
+    source_endpoint: str
+    model: Optional[str] = None
+    requests: List[PreprocessRequestItem]
+
+
 OpenAIServingRequest = Union[
     ChatCompletionRequest,
     CompletionRequest,
